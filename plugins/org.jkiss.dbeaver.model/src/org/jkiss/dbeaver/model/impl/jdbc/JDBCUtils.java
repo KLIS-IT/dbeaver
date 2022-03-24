@@ -18,11 +18,14 @@ package org.jkiss.dbeaver.model.impl.jdbc;
 
 import org.jkiss.code.NotNull;
 import org.jkiss.code.Nullable;
+import org.jkiss.dbeaver.DBException;
 import org.jkiss.dbeaver.Log;
 import org.jkiss.dbeaver.ModelPreferences;
 import org.jkiss.dbeaver.model.*;
 import org.jkiss.dbeaver.model.exec.jdbc.JDBCResultSet;
 import org.jkiss.dbeaver.model.exec.jdbc.JDBCSession;
+import org.jkiss.dbeaver.model.exec.jdbc.JDBCStatement;
+import org.jkiss.dbeaver.model.runtime.DBRProgressMonitor;
 import org.jkiss.dbeaver.model.sql.SQLDialect;
 import org.jkiss.dbeaver.model.sql.SQLUtils;
 import org.jkiss.dbeaver.model.struct.DBSObjectFilter;
@@ -33,6 +36,8 @@ import org.jkiss.utils.CommonUtils;
 import java.lang.reflect.InvocationTargetException;
 import java.math.BigDecimal;
 import java.sql.*;
+import java.sql.Date;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -853,5 +858,55 @@ public class JDBCUtils {
             keysRS.next();
             return keysRS.getLong(1);
         }
+    }
+
+    /**
+     * Fetches objects from a database by executing a given static SQL, mapping each row to a result object via a JDBCRowMapper.
+     *
+     * <p> Inspired by
+     * <a href="https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/jdbc/core/JdbcOperations.html#query-java.lang.String-org.springframework.jdbc.core.RowMapper-">
+     *     JdbcOperations.query()</a> from Spring JDBC.
+     *
+     * @param objects a container for fetched objects
+     * @param limit the maximum allowed number of objects in the container
+     * @param session jdbc session
+     * @param sql SQL query to be executed
+     * @param mapper used to map each row from a result set to a POJO
+     * @param <T> type of fetched objects
+     * @throws SQLException SQLException
+     * @throws DBException DBException
+     */
+    public static <T> void fetchObjects(@NotNull Collection<? super T> objects, int limit, @NotNull JDBCSession session, @NotNull CharSequence sql,
+                                        @NotNull JDBCRowMapper<T> mapper) throws SQLException, DBException {
+        DBRProgressMonitor monitor = session.getProgressMonitor();
+        if (isFetchCompleted(monitor, objects, limit)) {
+            return;
+        }
+        // Let's say that query execution takes 50% of the time and result set traversal takes another 50%
+        int halfOfWork = limit - objects.size();
+        monitor.beginTask("Fetching objects", halfOfWork * 2);
+
+        try (JDBCStatement statement = session.createStatement()) {
+            try (JDBCResultSet resultSet = statement.executeQuery(sql.toString())) {
+                monitor.worked(halfOfWork);
+                if (resultSet == null) {
+                    log.debug("Result set is null");
+                    return;
+                }
+                while (!isFetchCompleted(monitor, objects, limit) && resultSet.next()) {
+                    T t = mapper.mapRow(resultSet);
+                    if (t != null) {
+                        objects.add(t);
+                        monitor.worked(1);
+                    }
+                }
+            }
+        } finally {
+            monitor.done();
+        }
+    }
+
+    private static boolean isFetchCompleted(@NotNull DBRProgressMonitor monitor, @NotNull Collection<?> objects, int limit) {
+        return monitor.isCanceled() || objects.size() >= limit;
     }
 }
